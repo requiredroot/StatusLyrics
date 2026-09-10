@@ -5,7 +5,10 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Very small zero-dependency LRC (synced lyrics) parser. */
+/** Very small zero-dependency LRC (synced lyrics) parser.
+ * Matches [mm:ss] or [mm:ss.xx] / [mm:ss:xx] style stamps.
+ * Empty timestamps / metadata lines (e.g. [ar:...]) are skipped.
+ */
 public final class LrcParser {
 
     // Matches [mm:ss] or [mm:ss.xx] / [mm:ss:xx] style stamps.
