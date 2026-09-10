@@ -54,8 +54,11 @@ public class StatusLyricsMod implements IXposedHookLoadPackage {
 
     private void hook(Class<?> clock) {
         // Primary: hook the constructor so we always catch the instance.
+        // MUST use findAndHookConstructor: hooking "<init>" via
+        // findAndHookMethod crashes SystemUI into a "Phone is starting"
+        // boot loop on most devices.
         try {
-            XposedHelpers.findAndHookMethod(clock, "<init>", new InstallHook());
+            XposedHelpers.findAndHookConstructor(clock, new InstallHook());
             XposedBridge.log("StatusLyrics: hooked Clock constructor");
         } catch (Throwable t) {
             XposedBridge.log("StatusLyrics: no Clock constructor: " + t);
