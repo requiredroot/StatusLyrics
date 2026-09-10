@@ -1,0 +1,17 @@
+# Gradle
+.gradle/
+build/
+*.apk
+*.aab
+
+# Local SDK path
+local.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Logs
+*.log

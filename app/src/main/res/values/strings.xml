@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">StatusLyrics</string>
+    <string name="main_desc">StatusLyrics — Xposed module
+
+Shows live lyrics of the currently playing song in the status bar,
+replacing the clock.
+
+Data is fetched from lrclib.net.
+
+Enable this module in LSPosed, scope it to System UI
+(com.android.systemui), then reboot.
+    </string>
+</resources>
