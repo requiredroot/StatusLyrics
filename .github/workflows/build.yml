@@ -58,7 +58,7 @@ jobs:
           fi
           ${ANDROID_HOME}/build-tools/36.0.0/apksigner sign \
             --ks "$DEBUGKEY" --ks-key-alias androiddebugkey \
-            --ks-pass:android --key-pass:android \
+            --ks-pass android --key-pass android \
             app/build/outputs/apk/release/app-release-unsigned.apk
           mv app/build/outputs/apk/release/app-release-unsigned.apk \
              app/build/outputs/apk/release/app-release-signed.apk
