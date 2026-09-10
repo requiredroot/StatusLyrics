@@ -81,7 +81,7 @@ public final class StatusLyricsController {
             try {
                 attachBestController(controllers);
             } catch (Throwable t) {
-                XposedBridge.log("StatusLyrics: sessions cb: " + t);
+                log("StatusLyrics: sessions cb: " + t);
             }
         }
     };
@@ -123,19 +123,65 @@ public final class StatusLyricsController {
             StatusLyricsController s = new StatusLyricsController(clockView);
             s.start(c);
         } catch (Throwable t) {
-            XposedBridge.log("StatusLyrics: start failed: " + t);
+            log("StatusLyrics: start failed: " + t);
         }
     }
 
+    private boolean started;
+    private int startAttempts;
+
     private void start(Context c) {
+        // Crash-loop guard #1: run session/listener setup on the main thread
+        // only; the hook already defers this, but double-check.
+        try {
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                main.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            start(c);
+                        } catch (Throwable t) {
+                            log("StatusLyrics: start repost: " + t);
+                        }
+                    }
+                });
+                return;
+            }
+        } catch (Throwable ignore) {
+        }
+        // Crash-loop guard #2: Notification-listener permission.
+        // getActiveSessions() without it throws SecurityException inside
+        // SystemUI -> boot loop. Retry with backoff until granted.
+        try {
+            if (!hasNotificationListenerPermission(c)) {
+                if (startAttempts++ < 30) {
+                    main.postDelayed(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                start(c);
+                            } catch (Throwable t) {
+                                log("StatusLyrics: start retry: " + t);
+                            }
+                        }
+                    }, 5000L);
+                } else {
+                    log("StatusLyrics: no notification-listener access; parked");
+                }
+                return;
+            }
+        } catch (Throwable t) {
+            log("StatusLyrics: permission check: " + t);
+            return;
+        }
         try {
             sessionManager = c.getSystemService(MediaSessionManager.class);
         } catch (Throwable t) {
-            XposedBridge.log("StatusLyrics: no MediaSessionManager: " + t);
+            log("StatusLyrics: no MediaSessionManager: " + t);
             return;
         }
         if (sessionManager == null) {
-            XposedBridge.log("StatusLyrics: MediaSessionManager null");
+            log("StatusLyrics: MediaSessionManager null");
             return;
         }
         notifyComp = new ComponentName("com.android.systemui",
@@ -143,13 +189,59 @@ public final class StatusLyricsController {
         try {
             sessionManager.addOnActiveSessionsChangedListener(
                     sessionsListener, notifyComp, main);
+        } catch (SecurityException se) {
+            // Lost a race with the permission check: park quietly, retry later.
+            log("StatusLyrics: listener denied (retrying): " + se);
+            if (startAttempts++ < 30) {
+                main.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            start(c);
+                        } catch (Throwable t) {
+                            log("StatusLyrics: start retry2: " + t);
+                        }
+                    }
+                }, 5000L);
+            }
+            sessionManager = null;
+            return;
         } catch (Throwable t) {
-            XposedBridge.log("StatusLyrics: add listener failed: " + t);
+            log("StatusLyrics: add listener failed: " + t);
         }
+        started = true;
         try {
             attachBestController(sessionManager.getActiveSessions(notifyComp));
+        } catch (SecurityException se) {
+            log("StatusLyrics: initial sessions denied: " + se);
         } catch (Throwable t) {
-            XposedBridge.log("StatusLyrics: initial sessions: " + t);
+            log("StatusLyrics: initial sessions: " + t);
+        }
+    }
+
+    /** True if SystemUI's NotificationListener is enabled by the user. */
+    private static boolean hasNotificationListenerPermission(Context c) {
+        try {
+            String flat = android.provider.Settings.Secure.getString(
+                    c.getContentResolver(), "enabled_notification_listeners");
+            if (flat == null || flat.isEmpty()) return false;
+            String me = "com.android.systemui/com.android.systemui.statusbar.phone"
+                    + ".NotificationListener";
+            String me2 = "com.android.systemui/.statusbar.phone.NotificationListener";
+            for (String part : flat.split(":")) {
+                if (part == null) continue;
+                if (part.contains(me) || part.contains(me2)) return true;
+            }
+            return false;
+        } catch (Throwable ignore) {
+            return false;
+        }
+    }
+
+    private static void log(String s) {
+        try {
+            log(s);
+        } catch (Throwable ignore) {
         }
     }
 
@@ -189,7 +281,7 @@ public final class StatusLyricsController {
             try {
                 controller.registerCallback(controllerCallback, main);
             } catch (Throwable t) {
-                XposedBridge.log("StatusLyrics: registerCallback: " + t);
+                log("StatusLyrics: registerCallback: " + t);
             }
             maybeFetchForCurrentMetadata();
         } else {
@@ -251,7 +343,7 @@ public final class StatusLyricsController {
                 }
             }).start();
         } catch (Throwable t) {
-            XposedBridge.log("StatusLyrics: maybeFetch: " + t);
+            log("StatusLyrics: maybeFetch: " + t);
         }
     }
 
