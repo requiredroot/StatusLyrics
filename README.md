@@ -18,11 +18,22 @@ This is inspired by the always-on lyrics view seen on LunarOS / AOSP mods.
 - Queries `lrclib.net/api/search` with `track_name`, `artist_name`, `duration`.
 - Parses **LRC** synced lyrics and follows playback position (ticker driven by
   the media session's `PlaybackState`).
-- Falls back to scrolling the plain lyrics when no synced version exists.
-- Hides the clock and injects a single-line marquee `TextView` in its place.
-- Robust hooking: primary hook targets
-  `com.android.systemui.statusbar.policy.Clock`; a fallback hooks any
-  `TextView` whose resource id matches `R.id.clock`.
+- Falls back to showing the plain lyrics when no synced version exists.
+
+### Crash-safe by design (no boot loops)
+
+Earlier builds could crash System UI and get the phone stuck on
+"Phone is starting". Version 1.1.0 is deliberately crash-safe:
+
+- **No process-wide hooks.** We only hook the `Clock` class (its constructor
+  and `onAttachedToWindow`) — never `TextView` globally.
+- **No view-tree mutation.** We never create or insert new views into the
+  status bar; we render lyrics onto the existing clock view itself (via
+  reflection, so it degrades to a no-op instead of crashing if the clock has
+  no text setter).
+- **Everything is guarded.** Install and every tick/callback are wrapped so a
+  failure can never propagate an exception into System UI's method chain.
+- If the `Clock` class isn't found, the module disables itself cleanly.
 
 ## Build
 

@@ -1,7 +1,6 @@
 package com.term.statuslyrics;
 
 import android.content.Context;
-import android.graphics.Color;
 import android.media.MediaMetadata;
 import android.media.session.MediaController;
 import android.media.session.MediaSessionManager;
@@ -9,13 +8,12 @@ import android.media.session.PlaybackState;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.TextUtils;
-import android.util.TypedValue;
-import android.view.Gravity;
 import android.view.View;
-import android.view.ViewGroup;
-import android.widget.TextView;
 
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -23,21 +21,24 @@ import java.util.concurrent.atomic.AtomicInteger;
 import de.robv.android.xposed.XposedBridge;
 
 /**
- * Injected into the System UI process. Hides the status bar clock and shows a
- * marquee TextView that follows the current lyric line of the active media
- * session, fetched from lrclib.net.
+ * Drives live lyrics on the status bar CLOCK view itself.
+ *
+ * Deliberately crash-safe:
+ *  - We reuse the passed view as the lyric surface; we NEVER create new views
+ *    and NEVER touch the status-bar container/view tree. This avoids any chance
+ *    of re-entrancy, concurrent modification, or a recursive hook that would
+ *    crash System UI (which would trap the phone on "Phone is starting").
+ *  - Every entry point is wrapped so nothing ever propagates an exception into
+ *    the hooked method chain.
  */
 public final class StatusLyricsController {
 
-    private static final long TICK_MS = 160L;
+    private static final long TICK_MS = 120L;
+    private static final Set<View> INSTALLED =
+            Collections.synchronizedSet(Collections.newSetFromMap(
+                    new IdentityHashMap<View, Boolean>()));
 
-    private static final java.util.Set<View> INSTALLED =
-            java.util.Collections.synchronizedSet(
-                    java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<View, Boolean>()));
-
-    private final TextView clockView;
-    private final TextView lyricsView;
-    private final ViewGroup parent;
+    private final View clockView;   // reused as the lyric text surface
     private final Context context;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -47,53 +48,52 @@ public final class StatusLyricsController {
     private MediaController controller;
     private List<LyricLine> lines;
     private boolean hasSynced;
-    private String plainText;
+
+    private static java.lang.reflect.Method mSetText;
 
     private final Runnable ticker = new Runnable() {
         @Override
         public void run() {
-            updateLine();
-            main.postDelayed(this, TICK_MS);
+            try {
+                updateLine();
+            } catch (Throwable ignore) {
+            }
+            try {
+                main.postDelayed(this, TICK_MS);
+            } catch (Throwable ignore) {
+            }
         }
     };
 
-    private StatusLyricsController(TextView clockView) {
+    private StatusLyricsController(View clockView) {
         this.clockView = clockView;
-        this.parent = (ViewGroup) clockView.getParent();
         this.context = clockView.getContext();
-        this.lyricsView = buildLyricsView();
     }
 
-    public static synchronized void install(TextView clockView) {
-        if (clockView == null || clockView.getParent() == null) {
+    public static synchronized void install(View clockView) {
+        if (clockView == null || INSTALLED.contains(clockView)) {
             return;
         }
-        if (!(clockView.getParent() instanceof ViewGroup)) {
-            return;
-        }
-        if (INSTALLED.contains(clockView)) {
-            return; // already handled for this clock view
+        Context c = clockView.getContext();
+        if (c == null) {
+            return; // not attached yet; the attach hook will retry
         }
         INSTALLED.add(clockView);
-        StatusLyricsController c = new StatusLyricsController(clockView);
         try {
-            c.start();
+            new StatusLyricsController(clockView).start();
         } catch (Throwable t) {
             XposedBridge.log("StatusLyrics: install failed", t);
         }
     }
 
     private void start() {
-        int idx = parent.indexOfChild(clockView);
-        if (idx >= 0) {
-            parent.addView(lyricsView, idx);
-        } else {
-            parent.addView(lyricsView);
+        try {
+            sessionManager = (MediaSessionManager) context
+                    .getSystemService(Context.MEDIA_SESSION_SERVICE);
+        } catch (Throwable t) {
+            XposedBridge.log("StatusLyrics: no media session service", t);
+            return;
         }
-        clockView.setVisibility(View.GONE);
-
-        sessionManager = (MediaSessionManager) context
-                .getSystemService(Context.MEDIA_SESSION_SERVICE);
         if (sessionManager == null) {
             return;
         }
@@ -105,75 +105,18 @@ public final class StatusLyricsController {
         }
     }
 
-    private TextView buildLyricsView() {
-        TextView tv = new TextView(context);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
-        tv.setTextColor(Color.WHITE);
-        tv.setShadowLayer(5f, 0f, 1f, Color.BLACK);
-        tv.setGravity(Gravity.CENTER_VERTICAL);
-        tv.setSingleLine(true);
-        tv.setEllipsize(TextUtils.TruncateAt.MARQUEE);
-        tv.setMarqueeRepeatLimit(-1);
-        tv.setFocusable(true);
-        tv.setFocusableInTouchMode(true);
-        tv.setSelected(true);
-        tv.setMaxWidth(dp(240));
-        tv.setVisibility(View.GONE);
-        return tv;
-    }
-
-    private int dp(int v) {
-        return (int) (v * context.getResources().getDisplayMetrics().density + 0.5f);
-    }
-// ---- Media sessions -----------------------------------------------------
+    // ---- media session ----------------------------------------------------
 
     private final MediaSessionManager.OnActiveSessionsChangedListener sessionsListener =
             new MediaSessionManager.OnActiveSessionsChangedListener() {
                 @Override
                 public void onActiveSessionsChanged(List<MediaController> controllers) {
-                    onSessionsChanged(controllers);
+                    try {
+                        onSessionsChanged(controllers);
+                    } catch (Throwable ignore) {
+                    }
                 }
             };
-
-    private void onSessionsChanged(List<MediaController> controllers) {
-        if (controller != null) {
-            try {
-                controller.unregisterCallback(controllerCallback);
-            } catch (Throwable ignore) {
-            }
-            controller = null;
-        }
-        if (controllers != null) {
-            MediaController fallback = null;
-            for (MediaController c : controllers) {
-                MediaMetadata md = c.getMetadata();
-                if (md == null) continue;
-                String title = md.getString(MediaMetadata.METADATA_KEY_TITLE);
-                if (TextUtils.isEmpty(title)) continue;
-                int state = stateOf(c);
-                if (state == PlaybackState.STATE_PLAYING) {
-                    controller = c;
-                    break;
-                }
-                if (fallback == null) fallback = c;
-            }
-            if (controller == null) controller = fallback;
-        }
-        if (controller == null) {
-            hideLyrics();
-            return;
-        }
-        try {
-            controller.registerCallback(controllerCallback, main);
-        } catch (Throwable ignore) {
-        }
-        updateTrack();
-    }
-
-    private int stateOf(MediaController c) {
-        PlaybackState st = c.getPlaybackState();
-        return st == null ? PlaybackState.STATE_NONE : st.getState();
-    }
 
     private final MediaController.Callback controllerCallback = new MediaController.Callback() {
         @Override
@@ -187,78 +130,132 @@ public final class StatusLyricsController {
         }
     };
 
-    // ---- Track / lyrics --------------------------------------------------
+    private void onSessionsChanged(List<MediaController> controllers) {
+        try {
+            if (controller != null) {
+                try {
+                    controller.unregisterCallback(controllerCallback);
+                } catch (Throwable ignore) {
+                }
+                controller = null;
+            }
+            if (controllers != null) {
+                MediaController fallback = null;
+                for (MediaController c : controllers) {
+                    MediaMetadata md = c.getMetadata();
+                    if (md == null) {
+                        continue;
+                    }
+                    if (TextUtils.isEmpty(md.getString(MediaMetadata.METADATA_KEY_TITLE))) {
+                        continue;
+                    }
+                    int st = stateOf(c);
+                    if (st == PlaybackState.STATE_PLAYING) {
+                        controller = c;
+                        break;
+                    }
+                    if (fallback == null) {
+                        fallback = c;
+                    }
+                }
+                if (controller == null) {
+                    controller = fallback;
+                }
+            }
+            if (controller == null) {
+                clearLyrics();
+                return;
+            }
+            try {
+                controller.registerCallback(controllerCallback, main);
+            } catch (Throwable ignore) {
+            }
+            updateTrack();
+        } catch (Throwable t) {
+            XposedBridge.log("StatusLyrics: sessions changed failed", t);
+        }
+    }
+
+    private int stateOf(MediaController c) {
+        PlaybackState st = null;
+        try {
+            st = c.getPlaybackState();
+        } catch (Throwable ignore) {
+        }
+        return st == null ? PlaybackState.STATE_NONE : st.getState();
+    }
+
+    // ---- track / lyrics ---------------------------------------------------
 
     private void updateTrack() {
-        if (controller == null) {
-            hideLyrics();
-            return;
-        }
-        MediaMetadata md = controller.getMetadata();
-        if (md == null) {
-            hideLyrics();
-            return;
-        }
-        String title = md.getString(MediaMetadata.METADATA_KEY_TITLE);
-        if (TextUtils.isEmpty(title)) {
-            hideLyrics();
-            return;
-        }
-        String artist = md.getString(MediaMetadata.METADATA_KEY_ARTIST);
-        long duration = md.getLong(MediaMetadata.METADATA_KEY_DURATION);
-
-        // Reset state for the new track.
-        lines = null;
-        hasSynced = false;
-        plainText = null;
-        main.removeCallbacks(ticker);
-
-        int token = fetchToken.incrementAndGet();
-        showText("♫ " + title);
-
-        final String fTitle = title;
-        final String fArtist = artist;
-        final long fDuration = duration;
-        executor.execute(new Runnable() {
-            @Override
-            public void run() {
-                LrclibClient.Result r = LrclibClient.fetch(fTitle, fArtist, fDuration);
-                if (fetchToken.get() != token) {
-                    return; // stale result for an old track
-                }
-                main.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        applyResult(r);
-                    }
-                });
+        try {
+            if (controller == null) {
+                clearLyrics();
+                return;
             }
-        });
+            MediaMetadata md = controller.getMetadata();
+            if (md == null) {
+                clearLyrics();
+                return;
+            }
+            String title = md.getString(MediaMetadata.METADATA_KEY_TITLE);
+            if (TextUtils.isEmpty(title)) {
+                clearLyrics();
+                return;
+            }
+            String artist = md.getString(MediaMetadata.METADATA_KEY_ARTIST);
+            long duration = md.getLong(MediaMetadata.METADATA_KEY_DURATION);
+
+            clearLyrics();
+            int token = fetchToken.incrementAndGet();
+            setLyricsText("♫ " + title);
+
+            final String fTitle = title;
+            final String fArtist = artist;
+            final long fDuration = duration;
+            executor.execute(new Runnable() {
+                @Override
+                public void run() {
+                    LrclibClient.Result r = LrclibClient.fetch(fTitle, fArtist, fDuration);
+                    if (fetchToken.get() != token) {
+                        return; // stale result for an old track
+                    }
+                    main.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                applyResult(r);
+                            } catch (Throwable ignore) {
+                            }
+                        }
+                    });
+                }
+            });
+        } catch (Throwable t) {
+            XposedBridge.log("StatusLyrics: updateTrack failed", t);
+        }
     }
 
     private void applyResult(LrclibClient.Result r) {
         if (r == null) {
-            hideLyrics();
+            clearLyrics();
             return;
         }
-        plainText = r.plain;
         if (r.synced != null && !r.synced.isEmpty()) {
             lines = r.synced;
             hasSynced = true;
-            lyricsView.setVisibility(View.VISIBLE);
             updateLine();
-            main.removeCallbacks(ticker);
-            main.post(ticker);
-        } else if (!TextUtils.isEmpty(plainText)) {
-            // Unsynced lyrics: scroll them as one long marquee line.
+            try {
+                main.removeCallbacks(ticker);
+                main.post(ticker);
+            } catch (Throwable ignore) {
+            }
+        } else if (!TextUtils.isEmpty(r.plain)) {
             hasSynced = false;
             lines = null;
-            String joined = plainText.replace("\n", "   ");
-            lyricsView.setVisibility(View.VISIBLE);
-            lyricsView.setText(joined);
-            lyricsView.setSelected(true);
+            setLyricsText(r.plain.replace("\n", "   "));
         } else {
-            hideLyrics();
+            clearLyrics();
         }
     }
 
@@ -269,12 +266,11 @@ public final class StatusLyricsController {
         if (stateOf(controller) != PlaybackState.STATE_PLAYING) {
             return; // keep last shown line while paused
         }
-        long pos = positionMs();
-        int idx = LrcParser.indexAt(lines, pos);
+        int idx = LrcParser.indexAt(lines, positionMs());
         if (idx >= 0) {
             String text = lines.get(idx).text;
             if (!TextUtils.isEmpty(text)) {
-                lyricsView.setText(text);
+                setLyricsText(text);
             }
         }
     }
@@ -288,13 +284,32 @@ public final class StatusLyricsController {
         }
     }
 
-    private void showText(String s) {
-        lyricsView.setText(s);
-        lyricsView.setVisibility(View.VISIBLE);
+    // ---- rendering on the reused clock view ------------------------------
+
+    private void setLyricsText(String s) {
+        if (clockView == null) {
+            return;
+        }
+        try {
+            if (mSetText == null) {
+                mSetText = clockView.getClass().getMethod("setText", CharSequence.class);
+                mSetText.setAccessible(true);
+            }
+            String t = s == null ? "" : s;
+            mSetText.invoke(clockView, t);
+        } catch (Throwable ignore) {
+            // If the clock isn't TextView-based (or reflection fails) we simply
+            // do nothing — under no circumstances do we crash System UI.
+        }
     }
 
-    private void hideLyrics() {
-        main.removeCallbacks(ticker);
-        lyricsView.setVisibility(View.GONE);
+    private void clearLyrics() {
+        try {
+            main.removeCallbacks(ticker);
+        } catch (Throwable ignore) {
+        }
+        lines = null;
+        hasSynced = false;
+        setLyricsText(""); // empty text -> the clock updater shows the time
     }
 }

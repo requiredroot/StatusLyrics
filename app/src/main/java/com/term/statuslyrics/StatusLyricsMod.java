@@ -1,6 +1,6 @@
 package com.term.statuslyrics;
 
-import android.widget.TextView;
+import android.view.View;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -9,8 +9,13 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * Xposed entry point. Hooks the System UI process and attaches the lyrics
- * controller to the status bar clock.
+ * Xposed entry point.
+ *
+ * Hook strategy (crash-safe): we hook ONLY the SystemUI clock class, and we
+ * render lyrics on the clock view ITSELF. We never create additional views and
+ * we never hook TextView globally, so the module cannot recurse into itself or
+ * mutate the status-bar view tree — either of which would crash System UI and
+ * cause a boot loop ("Phone is starting").
  */
 public class StatusLyricsMod implements IXposedHookLoadPackage {
 
@@ -20,65 +25,46 @@ public class StatusLyricsMod implements IXposedHookLoadPackage {
 
     @Override
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lp) {
-        if (!SYSTEM_UI.equals(lp.packageName)) {
+        if (lp == null || !SYSTEM_UI.equals(lp.packageName)) {
             return;
         }
-        hookClockClass(lp);
+        Class<?> clock = null;
+        try {
+            clock = XposedHelpers.findClass(CLOCK_CLASS, lp.classLoader);
+        } catch (Throwable t) {
+            XposedBridge.log("StatusLyrics: Clock class not found, disabling: " + t);
+            return; // never fall back to a process-wide hook
+        }
+        hook(clock);
     }
 
-    private void hookClockClass(final XC_LoadPackage.LoadPackageParam lp) {
+    private void hook(Class<?> clock) {
+        // Primary: hook the constructor so we always catch the instance.
         try {
-            Class<?> clock = XposedHelpers.findClass(CLOCK_CLASS, lp.classLoader);
-            XposedHelpers.findAndHookMethod(clock, "onAttachedToWindow",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            try {
-                                TextView tv = (TextView) param.thisObject;
-                                StatusLyricsController.install(tv);
-                            } catch (Throwable t) {
-                                XposedBridge.log("StatusLyrics: clock hook", t);
-                            }
-                        }
-                    });
-            XposedBridge.log("StatusLyrics: hooked " + CLOCK_CLASS);
+            XposedHelpers.findAndHookMethod(clock, "<init>", new InstallHook());
+            XposedBridge.log("StatusLyrics: hooked Clock constructor");
         } catch (Throwable t) {
-            XposedBridge.log("StatusLyrics: primary clock class not found: " + t);
-            hookTextViewFallback(lp);
+            XposedBridge.log("StatusLyrics: no Clock constructor: " + t);
+        }
+
+        // Secondary: hook onAttachedToWindow (fires once the view has a Context).
+        try {
+            XposedHelpers.findAndHookMethod(clock, "onAttachedToWindow", new InstallHook());
+            XposedBridge.log("StatusLyrics: hooked Clock.onAttachedToWindow");
+        } catch (Throwable t) {
+            XposedBridge.log("StatusLyrics: no Clock.onAttachedToWindow: " + t);
         }
     }
 
-    /**
-     * Fallback for ROMs where Clock was renamed or is an anonymous subclass.
-     * Any TextView whose resource id matches SystemUI's R.id.clock is treated
-     * as the status bar clock.
-     */
-    private void hookTextViewFallback(final XC_LoadPackage.LoadPackageParam lp) {
-        final int clockId = resolveClockId(lp);
-        if (clockId == Integer.MIN_VALUE) {
-            XposedBridge.log("StatusLyrics: could not resolve clock resource id");
-            return;
-        }
-        XposedHelpers.findAndHookMethod(TextView.class, "onAttachedToWindow",
-                new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        TextView tv = (TextView) param.thisObject;
-                        if (tv.getId() == clockId) {
-                            StatusLyricsController.install(tv);
-                        }
-                    }
-                });
-        XposedBridge.log("StatusLyrics: hooked TextView fallback (clockId=" + clockId + ")");
-    }
-private int resolveClockId(final XC_LoadPackage.LoadPackageParam lp) {
-        try {
-            Class<?> rId = XposedHelpers.findClass(SYSTEM_UI + ".R$id", lp.classLoader);
-            java.lang.reflect.Field f = rId.getDeclaredField("clock");
-            f.setAccessible(true);
-            return f.getInt(null);
-        } catch (Throwable t) {
-            return Integer.MIN_VALUE;
+    private static final class InstallHook extends XC_MethodHook {
+        @Override
+        protected void afterHookedMethod(MethodHookParam param) {
+            if (param == null || param.thisObject == null) {
+                return;
+            }
+            if (param.thisObject instanceof View) {
+                StatusLyricsController.install((View) param.thisObject);
+            }
         }
     }
 }
