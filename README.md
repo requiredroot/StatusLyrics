@@ -26,14 +26,30 @@ This is inspired by the always-on lyrics view seen on LunarOS / AOSP mods.
 
 ## Build
 
-Requires an Android SDK (this repo uses `compileSdk 34`).
+Targets **Android 16 (API 36)** (`compileSdk 36`, `targetSdk 36`, `minSdk 26`).
+Requires an Android SDK.
 
 ```bash
 export ANDROID_HOME=$HOME/android-sdk   # wherever your SDK lives
 ./gradlew assembleDebug
 ```
 
-APK: `app/build/outputs/apk/debug/app-debug.apk`
+APKs:
+- Debug: `app/build/outputs/apk/debug/app-debug.apk`
+- Release (unsigned): `app/build/outputs/apk/release/app-release-unsigned.apk`
+
+### Building with GitHub Actions
+
+A workflow at `.github/workflows/build.yml` builds the **debug** and **release**
+(unsigned) APKs on every push to `main`, every pull request, and on manual
+`workflow_dispatch` runs. It:
+
+1. Sets up JDK 17 + the Android SDK with `platforms;android-36`.
+2. Runs `assembleDebug` and `assembleRelease`.
+3. Uploads both APKs as build artifacts.
+
+Pushing a tag named `v*` (e.g. `v1.0.0`) additionally creates a **GitHub
+Release** attached with both APKs.
 
 The Xposed API (`de.robv.android.xposed.*`) is provided as a **compile-only
 stub jar** (`app/libs/xposed-api.jar`, source in `xposed-stubs/`) because the
